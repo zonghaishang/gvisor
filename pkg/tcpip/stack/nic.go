@@ -16,10 +16,12 @@ package stack
 
 import (
 	"fmt"
+	"math/rand"
 	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -130,6 +132,12 @@ func newNIC(stack *Stack, id tcpip.NICID, name string, ep LinkEndpoint, ctx NICC
 		defaultRouters: make(map[tcpip.Address]defaultRouterState),
 		onLinkPrefixes: make(map[tcpip.Subnet]onLinkPrefixState),
 		slaacPrefixes:  make(map[tcpip.Subnet]slaacPrefixState),
+	}
+
+	header.InitialTempIID(nic.mu.ndp.temporaryIIDHistory[:], stack.tempIIDSeed, id)
+
+	if MaxDesyncFactor != 0 {
+		nic.mu.ndp.temporaryAddressDesyncFactor = time.Duration(rand.Int63n(int64(MaxDesyncFactor)))
 	}
 
 	// Register supported packet endpoint protocols.
@@ -1014,14 +1022,14 @@ func (n *NIC) removePermanentAddressLocked(addr tcpip.Address) *tcpip.Error {
 
 	switch r.protocol {
 	case header.IPv6ProtocolNumber:
-		return n.removePermanentIPv6EndpointLocked(r, true /* allowSLAAPrefixInvalidation */)
+		return n.removePermanentIPv6EndpointLocked(r, true /* allowSLAACInvalidation */)
 	default:
 		r.expireLocked()
 		return nil
 	}
 }
 
-func (n *NIC) removePermanentIPv6EndpointLocked(r *referencedNetworkEndpoint, allowSLAACPrefixInvalidation bool) *tcpip.Error {
+func (n *NIC) removePermanentIPv6EndpointLocked(r *referencedNetworkEndpoint, allowSLAACInvalidation bool) *tcpip.Error {
 	addr := r.addrWithPrefix()
 
 	isIPv6Unicast := header.IsV6UnicastAddress(addr.Address)
@@ -1031,8 +1039,11 @@ func (n *NIC) removePermanentIPv6EndpointLocked(r *referencedNetworkEndpoint, al
 
 		// If we are removing an address generated via SLAAC, cleanup
 		// its SLAAC resources and notify the integrator.
-		if r.configType == slaac {
-			n.mu.ndp.cleanupSLAACAddrResourcesAndNotify(addr, allowSLAACPrefixInvalidation)
+		switch r.configType {
+		case slaac:
+			n.mu.ndp.cleanupSLAACAddrResourcesAndNotify(addr, allowSLAACInvalidation)
+		case slaacTemp:
+			n.mu.ndp.cleanupTempSLAACAddrResourcesAndNotify(addr, allowSLAACInvalidation)
 		}
 	}
 
@@ -1440,8 +1451,15 @@ func (n *NIC) dupTentativeAddrDetected(addr tcpip.Address) *tcpip.Error {
 		return err
 	}
 
-	if ref.configType == slaac {
-		n.mu.ndp.regenerateSLAACAddr(ref.addrWithPrefix().Subnet())
+	prefix := ref.addrWithPrefix().Subnet()
+
+	switch ref.configType {
+	case slaac:
+		n.mu.ndp.regenerateSLAACAddr(prefix)
+	case slaacTemp:
+		// Do not reset the generation attempts counter for the prefix as the
+		// temporary address is being regenerated in response to a DAD conflict.
+		n.mu.ndp.regenerateTempSLAACAddr(prefix, false /* resetGenAttempts */)
 	}
 
 	return nil
@@ -1540,9 +1558,14 @@ const (
 	// multicast group).
 	static networkEndpointConfigType = iota
 
-	// A slaac configured endpoint is an IPv6 endpoint that was
-	// added by SLAAC as per RFC 4862 section 5.5.3.
+	// A SLAAC configured endpoint is an IPv6 endpoint that was added by
+	// SLAAC as per RFC 4862 section 5.5.3.
 	slaac
+
+	// A temporary SLAAC configured endpoint is an IPv6 endpoint that was added by
+	// SLAAC as per RFC 4941. Temporary SLAAC addresses are short-lived and are
+	// not expected to be valid (or preferred) forever; hence the term temporary.
+	slaacTemp
 )
 
 type referencedNetworkEndpoint struct {

@@ -38,6 +38,5 @@ func Sysinfo(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 		FreeRAM:  totalSize - totalUsage,
 		Unit:     1,
 	}
-	_, err := t.CopyOut(addr, si)
-	return 0, nil, err
+	return 0, nil, si.CopyOut(t, addr)
 }

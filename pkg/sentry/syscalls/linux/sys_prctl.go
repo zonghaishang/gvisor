@@ -25,6 +25,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 // Prctl implements linux syscall prctl(2).
@@ -43,8 +44,8 @@ func Prctl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		return 0, nil, nil
 
 	case linux.PR_GET_PDEATHSIG:
-		_, err := t.CopyOut(args[1].Pointer(), int32(t.ParentDeathSignal()))
-		return 0, nil, err
+		deathSig := primitive.Int32(t.ParentDeathSignal())
+		return 0, nil, deathSig.CopyOut(t, args[1].Pointer())
 
 	case linux.PR_GET_DUMPABLE:
 		d := t.MemoryManager().Dumpability()
@@ -110,7 +111,7 @@ func Prctl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 			buf[len] = 0
 			len++
 		}
-		_, err := t.CopyOut(addr, buf[:len])
+		_, err := t.CopyOutBytes(addr, buf[:len])
 		if err != nil {
 			return 0, nil, err
 		}

@@ -22,6 +22,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel/pipe"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/usermem"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 // pipe2 implements the actual system call with flags.
@@ -44,7 +45,7 @@ func pipe2(t *kernel.Task, addr usermem.Addr, flags uint) (uintptr, error) {
 		return 0, err
 	}
 
-	if _, err := t.CopyOut(addr, fds); err != nil {
+	if err := primitive.CopyInt32SliceOut(t, addr, fds); err != nil {
 		// The files are not closed in this case, the exact semantics
 		// of this error case are not well defined, but they could have
 		// already been observed by user space.

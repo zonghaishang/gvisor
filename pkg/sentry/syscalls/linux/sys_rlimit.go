@@ -50,6 +50,7 @@ func newRlimit(t *kernel.Task) (rlimit, error) {
 	}
 }
 
+// +marshal
 type rlimit64 struct {
 	Cur uint64
 	Max uint64
@@ -70,13 +71,11 @@ func (r *rlimit64) fromLimit(lim limits.Limit) {
 }
 
 func (r *rlimit64) copyIn(t *kernel.Task, addr usermem.Addr) error {
-	_, err := t.CopyIn(addr, r)
-	return err
+	return r.CopyIn(t, addr)
 }
 
 func (r *rlimit64) copyOut(t *kernel.Task, addr usermem.Addr) error {
-	_, err := t.CopyOut(addr, *r)
-	return err
+	return r.CopyOut(t, addr)
 }
 
 func makeRlimit64(lim limits.Limit) *rlimit64 {

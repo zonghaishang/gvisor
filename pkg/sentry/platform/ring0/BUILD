@@ -77,6 +77,7 @@ go_library(
     visibility = ["//pkg/sentry:internal"],
     deps = [
         "//pkg/cpuid",
+        "//pkg/sentry/arch",
         "//pkg/sentry/platform/ring0/pagetables",
         "//pkg/usermem",
     ],

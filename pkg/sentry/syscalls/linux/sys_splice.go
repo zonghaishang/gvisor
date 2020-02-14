@@ -21,6 +21,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 // doSplice implements a blocking splice operation.
@@ -130,8 +131,8 @@ func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 		}
 
 		// Copy in the offset.
-		var offset int64
-		if _, err := t.CopyIn(offsetAddr, &offset); err != nil {
+		var offset primitive.Int64
+		if err := offset.CopyIn(t, offsetAddr); err != nil {
 			return 0, nil, err
 		}
 
@@ -139,11 +140,12 @@ func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 		n, err = doSplice(t, outFile, inFile, fs.SpliceOpts{
 			Length:    count,
 			SrcOffset: true,
-			SrcStart:  offset,
+			SrcStart:  int64(offset),
 		}, outFile.Flags().NonBlocking)
 
 		// Copy out the new offset.
-		if _, err := t.CopyOut(offsetAddr, n+offset); err != nil {
+		offset += primitive.Int64(n)
+		if err := offset.CopyOut(t, offsetAddr); err != nil {
 			return 0, nil, err
 		}
 	} else {
@@ -217,14 +219,14 @@ func Splice(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 				return 0, nil, syserror.EINVAL
 			}
 
-			var offset int64
-			if _, err := t.CopyIn(outOffset, &offset); err != nil {
+			var offset primitive.Int64
+			if err := offset.CopyIn(t, outOffset); err != nil {
 				return 0, nil, err
 			}
 
 			// Use the destination offset.
 			opts.DstOffset = true
-			opts.DstStart = offset
+			opts.DstStart = int64(offset)
 		}
 	case !fs.IsPipe(inFileAttr) && fs.IsPipe(outFileAttr):
 		if outOffset != 0 {
@@ -235,14 +237,14 @@ func Splice(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 				return 0, nil, syserror.EINVAL
 			}
 
-			var offset int64
-			if _, err := t.CopyIn(inOffset, &offset); err != nil {
+			var offset primitive.Int64
+			if err := offset.CopyIn(t, inOffset); err != nil {
 				return 0, nil, err
 			}
 
 			// Use the source offset.
 			opts.SrcOffset = true
-			opts.SrcStart = offset
+			opts.SrcStart = int64(offset)
 		}
 	case fs.IsPipe(inFileAttr) && fs.IsPipe(outFileAttr):
 		if inOffset != 0 || outOffset != 0 {

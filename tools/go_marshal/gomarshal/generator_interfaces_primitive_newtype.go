@@ -227,3 +227,134 @@ func (g *interfaceGenerator) emitMarshallableForPrimitiveNewtype(nt *ast.Ident) 
 	})
 	g.emit("}\n\n")
 }
+
+func (g *interfaceGenerator) emitMarshallableSliceForPrimitiveNewtype(nt *ast.Ident, slice *sliceAPI) {
+	g.recordUsedImport("marshal")
+	g.recordUsedImport("usermem")
+	g.recordUsedImport("reflect")
+	g.recordUsedImport("runtime")
+	g.recordUsedImport("unsafe")
+
+	eltType := g.typeName()
+	if slice.inner {
+		eltType = nt.Name
+	}
+
+	g.emit("// Copy%sIn copies in a slice of %s objects from the task's memory.\n", slice.ident, eltType)
+	g.emit("func Copy%sIn(task marshal.Task, addr usermem.Addr, dst []%s) error {\n", slice.ident, eltType)
+	g.inIndent(func() {
+		g.emit("count := len(dst)\n")
+		g.emit("if count == 0 {\n")
+		g.inIndent(func() {
+			g.emit("return nil\n")
+		})
+		g.emit("}\n")
+		g.emit("size := (*%s)(nil).SizeBytes()\n\n", g.typeName())
+
+		g.emit("// Bypass escape analysis on dst. The no-op arithmetic operation on the\n")
+		g.emit("// pointer makes the compiler think val doesn't depend on dst.\n")
+		g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+		g.emit("ptr := unsafe.Pointer(&dst)\n")
+		g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+		g.emit("val = val^0\n\n")
+
+		g.emit("// Construct a slice backed by dst's underlying memory.\n")
+		g.emit("var buf []byte\n")
+		g.emit("hdr := (*reflect.SliceHeader)(unsafe.Pointer(&buf))\n")
+		g.emit("hdr.Data = val\n")
+		g.emit("hdr.Len = size * count\n")
+		g.emit("hdr.Cap = size * count\n")
+
+		g.emit("count, err := task.CopyInBytes(addr, buf)\n")
+		g.emit("// Since we bypassed the compiler's escape analysis, indicate that dst\n")
+		g.emit("// must live until after the CopyInBytes.\n")
+		g.emit("runtime.KeepAlive(dst)\n")
+		g.emit("return err\n")
+	})
+	g.emit("}\n\n")
+
+	g.emit("// Copy%sOut copies a slice of %s objects to the task's memory.\n", slice.ident, eltType)
+	g.emit("func Copy%sOut(task marshal.Task, addr usermem.Addr, src []%s) error {\n", slice.ident, eltType)
+	g.inIndent(func() {
+		g.emit("count := len(src)\n")
+		g.emit("if count == 0 {\n")
+		g.inIndent(func() {
+			g.emit("return nil\n")
+		})
+		g.emit("}\n")
+		g.emit("size := (*%s)(nil).SizeBytes()\n\n", g.typeName())
+
+		g.emit("// Bypass escape analysis on src. The no-op arithmetic operation on the\n")
+		g.emit("// pointer makes the compiler think val doesn't depend on src.\n")
+		g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+		g.emit("ptr := unsafe.Pointer(&src)\n")
+		g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+		g.emit("val = val^0\n\n")
+
+		g.emit("// Construct a slice backed by src's underlying memory.\n")
+		g.emit("var buf []byte\n")
+		g.emit("hdr := (*reflect.SliceHeader)(unsafe.Pointer(&buf))\n")
+		g.emit("hdr.Data = val\n")
+		g.emit("hdr.Len = size * count\n")
+		g.emit("hdr.Cap = size * count\n")
+
+		g.emit("_, err := task.CopyOutBytes(addr, buf)\n")
+		g.emit("// Since we bypassed the compiler's escape analysis, indicate that src\n")
+		g.emit("// must live until after the CopyOutBytes.\n")
+		g.emit("runtime.KeepAlive(src)\n")
+		g.emit("return err\n")
+	})
+	g.emit("}\n\n")
+
+	g.emit("// MarshalUnsafe%s is like %s.MarshalUnsafe, but for a []%s.\n", slice.ident, g.typeName(), g.typeName())
+	g.emit("func MarshalUnsafe%s(src []%s, dst []byte) error {\n", slice.ident, g.typeName())
+	g.inIndent(func() {
+		g.emit("count := len(src)\n")
+		g.emit("if count == 0 {\n")
+		g.inIndent(func() {
+			g.emit("return nil\n")
+		})
+		g.emit("}\n")
+		g.emit("size := (*%s)(nil).SizeBytes()\n\n", g.typeName())
+
+		g.emit("// Bypass escape analysis on src. The no-op arithmetic operation on the\n")
+		g.emit("// pointer makes the compiler think val doesn't depend on src.\n")
+		g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+		g.emit("ptr := unsafe.Pointer(&src)\n")
+		g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+		g.emit("val = val^0\n\n")
+
+		g.emit("_, err := safecopy.CopyIn(dst[:(size*count)], unsafe.Pointer(val))\n")
+		g.emit("// Since we bypassed the compiler's escape analysis, indicate that src\n")
+		g.emit("// must live until after the CopyIn.\n")
+		g.emit("runtime.KeepAlive(src)\n")
+		g.emit("return err\n")
+	})
+	g.emit("}\n\n")
+
+	g.emit("// UnmarshalUnsafe%s is like %s.UnmarshalUnsafe, but for a []%s.\n", slice.ident, g.typeName(), g.typeName())
+	g.emit("func UnmarshalUnsafe%s(dst []%s, src []byte) error {\n", slice.ident, g.typeName())
+	g.inIndent(func() {
+		g.emit("count := len(dst)\n")
+		g.emit("if count == 0 {\n")
+		g.inIndent(func() {
+			g.emit("return nil\n")
+		})
+		g.emit("}\n")
+		g.emit("size := (*%s)(nil).SizeBytes()\n\n", g.typeName())
+
+		g.emit("// Bypass escape analysis on src. The no-op arithmetic operation on the\n")
+		g.emit("// pointer makes the compiler think val doesn't depend on src.\n")
+		g.emit("// See src/runtime/stubs.go:noescape() in the golang toolchain.\n")
+		g.emit("ptr := unsafe.Pointer(&dst)\n")
+		g.emit("val := (*reflect.SliceHeader)(ptr).Data\n")
+		g.emit("val = val^0\n\n")
+
+		g.emit("_, err := safecopy.CopyOut(unsafe.Pointer(val), src[:(size*count)])\n")
+		g.emit("// Since we bypassed the compiler's escape analysis, indicate that src\n")
+		g.emit("// must live until after the CopyOut.\n")
+		g.emit("runtime.KeepAlive(src)\n")
+		g.emit("return err\n")
+	})
+	g.emit("}\n\n")
+}

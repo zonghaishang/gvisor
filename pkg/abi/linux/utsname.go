@@ -26,13 +26,15 @@ const (
 )
 
 // UtsName represents struct utsname, the struct returned by uname(2).
+//
+// +marshal
 type UtsName struct {
-	Sysname    [UTSLen + 1]byte
-	Nodename   [UTSLen + 1]byte
-	Release    [UTSLen + 1]byte
-	Version    [UTSLen + 1]byte
-	Machine    [UTSLen + 1]byte
-	Domainname [UTSLen + 1]byte
+	Sysname    [65]byte // UTSLen + 1, go-marshal: array len must be literal.
+	Nodename   [65]byte // UTSLen + 1
+	Release    [65]byte // UTSLen + 1
+	Version    [65]byte // UTSLen + 1
+	Machine    [65]byte // UTSLen + 1
+	Domainname [65]byte // UTSLen + 1
 }
 
 // utsNameString converts a UtsName entry to a string without NULs.

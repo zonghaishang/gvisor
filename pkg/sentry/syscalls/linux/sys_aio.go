@@ -15,8 +15,6 @@
 package linux
 
 import (
-	"encoding/binary"
-
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -25,6 +23,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/mm"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/usermem"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 // I/O commands.
@@ -47,6 +46,8 @@ const (
 //
 // The priority field is currently ignored in the implementation below. Also
 // note that the IOCB_FLAG_RESFD feature is not supported.
+//
+// +marshal
 type ioCallback struct {
 	Data      uint64
 	Key       uint32
@@ -69,6 +70,7 @@ type ioCallback struct {
 
 // ioEvent describes an I/O result.
 //
+// +marshal
 // +stateify savable
 type ioEvent struct {
 	Data    uint64
@@ -76,9 +78,6 @@ type ioEvent struct {
 	Result  int64
 	Result2 int64
 }
-
-// ioEventSize is the size of an ioEvent encoded.
-var ioEventSize = binary.Size(ioEvent{})
 
 // IoSetup implements linux syscall io_setup(2).
 func IoSetup(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
@@ -89,7 +88,8 @@ func IoSetup(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	//
 	// The context pointer _must_ be zero initially.
 	var idIn uint64
-	if _, err := t.CopyIn(idAddr, &idIn); err != nil {
+	idInP := primitive.Uint64(idIn)
+	if err := idInP.CopyIn(t, idAddr); err != nil {
 		return 0, nil, err
 	}
 	if idIn != 0 {
@@ -102,7 +102,8 @@ func IoSetup(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	}
 
 	// Copy out the new ID.
-	if _, err := t.CopyOut(idAddr, &id); err != nil {
+	idInP = primitive.Uint64(id)
+	if err := idInP.CopyOut(t, idAddr); err != nil {
 		t.MemoryManager().DestroyAIOContext(t, id)
 		return 0, nil, err
 	}
@@ -181,7 +182,7 @@ func IoGetevents(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.S
 		ev := v.(*ioEvent)
 
 		// Copy out the result.
-		if _, err := t.CopyOut(eventsAddr, ev); err != nil {
+		if err := ev.CopyOut(t, eventsAddr); err != nil {
 			if count > 0 {
 				return uintptr(count), nil, nil
 			}
@@ -190,7 +191,7 @@ func IoGetevents(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.S
 		}
 
 		// Keep rolling.
-		eventsAddr += usermem.Addr(ioEventSize)
+		eventsAddr += usermem.Addr(ev.SizeBytes())
 	}
 
 	// Everything finished.
@@ -365,21 +366,27 @@ func IoSubmit(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 	}
 
 	for i := int32(0); i < nrEvents; i++ {
-		// Copy in the address.
-		cbAddrNative := t.Arch().Native(0)
-		if _, err := t.CopyIn(addr, cbAddrNative); err != nil {
-			if i > 0 {
-				// Some successful.
-				return uintptr(i), nil, nil
+		// Copy in the callback address.
+		var cbAddr usermem.Addr
+		switch t.Arch().Width() {
+		case 8:
+			var cbAddrP primitive.Uint64
+			if err := cbAddrP.CopyIn(t, addr); err != nil {
+				if i > 0 {
+					// Some successful.
+					return uintptr(i), nil, nil
+				}
+				// Nothing done.
+				return 0, nil, err
 			}
-			// Nothing done.
-			return 0, nil, err
+			cbAddr = usermem.Addr(cbAddrP)
+		default:
+			return 0, nil, syserror.ENOSYS
 		}
 
 		// Copy in this callback.
 		var cb ioCallback
-		cbAddr := usermem.Addr(t.Arch().Value(cbAddrNative))
-		if _, err := t.CopyIn(cbAddr, &cb); err != nil {
+		if err := cb.CopyIn(t, cbAddr); err != nil {
 
 			if i > 0 {
 				// Some have been successful.

@@ -254,7 +254,7 @@ func Utimes(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 		opts.Stat.Mtime.Nsec = linux.UTIME_NOW
 	} else {
 		var times [2]linux.Timeval
-		if _, err := t.CopyIn(timesAddr, &times); err != nil {
+		if err := linux.CopyTimevalSliceIn(t, timesAddr, times[:]); err != nil {
 			return 0, nil, err
 		}
 		opts.Stat.Atime = linux.StatxTimestamp{
@@ -321,7 +321,7 @@ func populateSetStatOptionsForUtimens(t *kernel.Task, timesAddr usermem.Addr, op
 		return nil
 	}
 	var times [2]linux.Timespec
-	if _, err := t.CopyIn(timesAddr, &times); err != nil {
+	if err := linux.CopyTimespecSliceIn(t, timesAddr, times[:]); err != nil {
 		return err
 	}
 	if times[0].Nsec != linux.UTIME_OMIT {

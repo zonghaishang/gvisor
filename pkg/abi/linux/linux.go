@@ -21,6 +21,8 @@ package linux
 const NumSoftIRQ = 10
 
 // Sysinfo is the structure provided by sysinfo on linux versions > 2.3.48.
+//
+// +marshal
 type Sysinfo struct {
 	Uptime    int64
 	Loads     [3]uint64

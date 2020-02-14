@@ -216,8 +216,7 @@ func statx(t *kernel.Task, sattr fs.StableAttr, uattr fs.UnstableAttr, statxAddr
 		DevMajor:  uint32(devMajor),
 		DevMinor:  devMinor,
 	}
-	_, err := t.CopyOut(statxAddr, &s)
-	return err
+	return s.CopyOut(t, statxAddr)
 }
 
 // Statfs implements linux syscall statfs(2).
@@ -278,8 +277,7 @@ func statfsImpl(t *kernel.Task, d *fs.Dirent, addr usermem.Addr) error {
 		FragmentSize: d.Inode.StableAttr.BlockSize,
 		// Leave other fields 0 like simple_statfs does.
 	}
-	_, err = t.CopyOut(addr, &statfs)
-	return err
+	return statfs.CopyOut(t, addr)
 }
 
 // LINT.ThenChange(vfs2/stat.go)

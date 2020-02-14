@@ -24,6 +24,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/usermem"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 const opsMax = 500 // SEMOPM
@@ -66,7 +67,7 @@ func Semop(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	}
 
 	ops := make([]linux.Sembuf, nsops)
-	if _, err := t.CopyIn(sembufAddr, ops); err != nil {
+	if err := linux.CopySembufSliceIn(t, sembufAddr, ops); err != nil {
 		return 0, nil, err
 	}
 
@@ -116,8 +117,8 @@ func Semctl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 
 	case linux.IPC_SET:
 		arg := args[3].Pointer()
-		s := linux.SemidDS{}
-		if _, err := t.CopyIn(arg, &s); err != nil {
+		var s linux.SemidDS
+		if err := s.CopyIn(t, arg); err != nil {
 			return 0, nil, err
 		}
 
@@ -188,7 +189,7 @@ func setValAll(t *kernel.Task, id int32, array usermem.Addr) error {
 		return syserror.EINVAL
 	}
 	vals := make([]uint16, set.Size())
-	if _, err := t.CopyIn(array, vals); err != nil {
+	if err := primitive.CopyUint16SliceIn(t, array, vals); err != nil {
 		return err
 	}
 	creds := auth.CredentialsFromContext(t)
@@ -217,8 +218,7 @@ func getValAll(t *kernel.Task, id int32, array usermem.Addr) error {
 	if err != nil {
 		return err
 	}
-	_, err = t.CopyOut(array, vals)
-	return err
+	return primitive.CopyUint16SliceOut(t, array, vals)
 }
 
 func getPID(t *kernel.Task, id int32, num int32) (int32, error) {

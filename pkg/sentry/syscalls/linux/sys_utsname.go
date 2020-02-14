@@ -48,8 +48,7 @@ func Uname(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 
 	// Copy out the result.
 	va := args[0].Pointer()
-	_, err := t.CopyOut(va, u)
-	return 0, nil, err
+	return 0, nil, u.CopyOut(t, va)
 }
 
 // Setdomainname implements Linux syscall setdomainname.

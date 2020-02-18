@@ -4888,6 +4888,8 @@ func TestListenNoAcceptNonUnicastV4(t *testing.T) {
 	}
 
 	for _, test := range tests {
+		test := test // capture range variable
+
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -4990,6 +4992,8 @@ func TestListenNoAcceptNonUnicastV6(t *testing.T) {
 	}
 
 	for _, test := range tests {
+		test := test // capture range variable
+
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 

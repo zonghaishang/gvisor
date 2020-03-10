@@ -29,6 +29,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -264,6 +265,13 @@ type SocketOperations struct {
 	skType   linux.SockType
 	protocol int
 
+	// readViewHasData is 1 iff readView has data to be read, 0 otherwise.
+	// Must be accessed using atomic operations. The reason its not
+	// protected by readMu below is to support epoll we need to be
+	// able to check Readiness without holding readMu to avoid
+	// deadlock.
+	readViewHasData uint32
+
 	// readMu protects access to the below fields.
 	readMu sync.Mutex `state:"nosave"`
 	// readView contains the remaining payload from the last packet.
@@ -414,17 +422,18 @@ func (s *SocketOperations) fetchReadView() *syserr.Error {
 	if len(s.readView) > 0 {
 		return nil
 	}
-
 	s.readView = nil
 	s.sender = tcpip.FullAddress{}
 
 	v, cms, err := s.Endpoint.Read(&s.sender)
 	if err != nil {
+		atomic.StoreUint32(&s.readViewHasData, 0)
 		return syserr.TranslateNetstackError(err)
 	}
 
 	s.readView = v
 	s.readCM = cms
+	atomic.StoreUint32(&s.readViewHasData, 1)
 
 	return nil
 }
@@ -623,11 +632,9 @@ func (s *SocketOperations) Readiness(mask waiter.EventMask) waiter.EventMask {
 	// Check our cached value iff the caller asked for readability and the
 	// endpoint itself is currently not readable.
 	if (mask & ^r & waiter.EventIn) != 0 {
-		s.readMu.Lock()
-		if len(s.readView) > 0 {
+		if atomic.LoadUint32(&s.readViewHasData) == 1 {
 			r |= waiter.EventIn
 		}
-		s.readMu.Unlock()
 	}
 
 	return r
@@ -2334,6 +2341,10 @@ func (s *SocketOperations) coalescingRead(ctx context.Context, dst usermem.IOSeq
 		}
 		copied += n
 		s.readView.TrimFront(n)
+		if len(s.readView) == 0 {
+			atomic.StoreUint32(&s.readViewHasData, 0)
+		}
+
 		dst = dst.DropFirst(n)
 		if e != nil {
 			err = syserr.FromError(e)
@@ -2454,6 +2465,10 @@ func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSe
 	} else {
 		msgLen = int(n)
 		s.readView.TrimFront(int(n))
+	}
+
+	if len(s.readView) == 0 {
+		atomic.StoreUint32(&s.readViewHasData, 0)
 	}
 
 	var flags int

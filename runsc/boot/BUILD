@@ -87,6 +87,7 @@ go_library(
         "//pkg/tcpip",
         "//pkg/tcpip/link/fdbased",
         "//pkg/tcpip/link/loopback",
+        "//pkg/tcpip/link/qdisc/fifo",
         "//pkg/tcpip/link/sniffer",
         "//pkg/tcpip/network/arp",
         "//pkg/tcpip/network/ipv4",

@@ -44,6 +44,7 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/binary"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
@@ -428,7 +429,7 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.Ne
 			}
 		}
 
-		vnetHdrBuf := vnetHdrToByteSlice(&vnetHdr)
+		vnetHdrBuf := binary.Marshal(make([]byte, 0, virtioNetHdrSize), binary.LittleEndian, vnetHdr)
 		return rawfile.NonBlockingWrite3(fd, vnetHdrBuf, pkt.Header.View(), pkt.Data.ToView())
 	}
 
@@ -442,113 +443,122 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.Ne
 // WritePackets writes outbound packets to the file descriptor. If it is not
 // currently writable, the packet is dropped.
 //
-// NOTE: This API uses sendmmsg to batch packets. As a result the underlying FD
-// picked to write the packet out has to be the same for all packets in the
-// list. In other words all packets in the batch should belong to the same
-// flow.
-func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.PacketBufferList, protocol tcpip.NetworkProtocolNumber) (int, *tcpip.Error) {
-	n := pkts.Len()
-
-	mmsgHdrs := make([]rawfile.MMsgHdr, n)
-	i := 0
+// WritePackets being a batch API every packet in pkts should have
+// the following fields set EgressRoute, GSOOptions, Protocol.
+func (e *endpoint) WritePackets(_ *stack.Route, _ *stack.GSO, pkts stack.PacketBufferList, _ tcpip.NetworkProtocolNumber) (int, *tcpip.Error) {
+	// Since we have to map packets to specific underlying FD's we need to first
+	// split the packet list into batches that hash to the same underlying FD.
+	// The index of the map is the fd to which we write associated batch of packets.
+	batches := make(map[int][]*stack.PacketBuffer)
 	for pkt := pkts.Front(); pkt != nil; pkt = pkt.Next() {
-		var ethHdrBuf []byte
-		iovLen := 0
-		if e.hdrSize > 0 {
-			// Add ethernet header if needed.
-			ethHdrBuf = make([]byte, header.EthernetMinimumSize)
-			eth := header.Ethernet(ethHdrBuf)
-			ethHdr := &header.EthernetFields{
-				DstAddr: r.RemoteLinkAddress,
-				Type:    protocol,
-			}
+		fd := e.fds[pkt.Hash%uint32(len(e.fds))]
+		batches[fd] = append(batches[fd], pkt)
+	}
 
-			// Preserve the src address if it's set in the route.
-			if r.LocalLinkAddress != "" {
-				ethHdr.SrcAddr = r.LocalLinkAddress
-			} else {
-				ethHdr.SrcAddr = e.addr
-			}
-			eth.Encode(ethHdr)
-			iovLen++
-		}
-
-		var vnetHdrBuf []byte
-		vnetHdr := virtioNetHdr{}
-		if e.Capabilities()&stack.CapabilityHardwareGSO != 0 {
-			if gso != nil {
-				vnetHdr.hdrLen = uint16(pkt.Header.UsedLength())
-				if gso.NeedsCsum {
-					vnetHdr.flags = _VIRTIO_NET_HDR_F_NEEDS_CSUM
-					vnetHdr.csumStart = header.EthernetMinimumSize + gso.L3HdrLen
-					vnetHdr.csumOffset = gso.CsumOffset
+	sentPackets := 0
+	for batchFD := range batches {
+		mmsgHdrIdx := 0
+		n := len(batches[batchFD])
+		mmsgHdrs := make([]rawfile.MMsgHdr, n)
+		for _, pkt := range batches[batchFD] {
+			var ethHdrBuf []byte
+			iovLen := 0
+			if e.hdrSize > 0 {
+				// Add ethernet header if needed.
+				ethHdrBuf = make([]byte, header.EthernetMinimumSize)
+				eth := header.Ethernet(ethHdrBuf)
+				ethHdr := &header.EthernetFields{
+					DstAddr: pkt.EgressRoute.RemoteLinkAddress,
+					Type:    pkt.NetworkProtocolNumber,
 				}
-				if gso.Type != stack.GSONone && uint16(pkt.Data.Size()) > gso.MSS {
-					switch gso.Type {
-					case stack.GSOTCPv4:
-						vnetHdr.gsoType = _VIRTIO_NET_HDR_GSO_TCPV4
-					case stack.GSOTCPv6:
-						vnetHdr.gsoType = _VIRTIO_NET_HDR_GSO_TCPV6
-					default:
-						panic(fmt.Sprintf("Unknown gso type: %v", gso.Type))
+
+				// Preserve the src address if it's set in the route.
+				if pkt.EgressRoute.LocalLinkAddress != "" {
+					ethHdr.SrcAddr = pkt.EgressRoute.LocalLinkAddress
+				} else {
+					ethHdr.SrcAddr = e.addr
+				}
+				eth.Encode(ethHdr)
+				iovLen++
+			}
+
+			vnetHdr := virtioNetHdr{}
+			var vnetHdrBuf []byte
+			if e.Capabilities()&stack.CapabilityHardwareGSO != 0 {
+				if pkt.GSOOptions != nil {
+					vnetHdr.hdrLen = uint16(pkt.Header.UsedLength())
+					if pkt.GSOOptions.NeedsCsum {
+						vnetHdr.flags = _VIRTIO_NET_HDR_F_NEEDS_CSUM
+						vnetHdr.csumStart = header.EthernetMinimumSize + pkt.GSOOptions.L3HdrLen
+						vnetHdr.csumOffset = pkt.GSOOptions.CsumOffset
 					}
-					vnetHdr.gsoSize = gso.MSS
+					if pkt.GSOOptions.Type != stack.GSONone && uint16(pkt.Data.Size()) > pkt.GSOOptions.MSS {
+						switch pkt.GSOOptions.Type {
+						case stack.GSOTCPv4:
+							vnetHdr.gsoType = _VIRTIO_NET_HDR_GSO_TCPV4
+						case stack.GSOTCPv6:
+							vnetHdr.gsoType = _VIRTIO_NET_HDR_GSO_TCPV6
+						default:
+							panic(fmt.Sprintf("Unknown gso type: %v", pkt.GSOOptions.Type))
+						}
+						vnetHdr.gsoSize = pkt.GSOOptions.MSS
+					}
 				}
+				vnetHdrBuf = binary.Marshal(make([]byte, 0, virtioNetHdrSize), binary.LittleEndian, vnetHdr)
+				iovLen++
 			}
-			vnetHdrBuf = vnetHdrToByteSlice(&vnetHdr)
-			iovLen++
-		}
 
-		iovecs := make([]syscall.Iovec, iovLen+1+len(pkt.Data.Views()))
-		mmsgHdr := &mmsgHdrs[i]
-		mmsgHdr.Msg.Iov = &iovecs[0]
-		iovecIdx := 0
-		if vnetHdrBuf != nil {
+			iovecs := make([]syscall.Iovec, iovLen+1+len(pkt.Data.Views()))
+			mmsgHdr := &mmsgHdrs[mmsgHdrIdx]
+			mmsgHdr.Msg.Iov = &iovecs[0]
+			iovecIdx := 0
+			if vnetHdrBuf != nil {
+				v := &iovecs[iovecIdx]
+				v.Base = &vnetHdrBuf[0]
+				v.Len = uint64(len(vnetHdrBuf))
+				iovecIdx++
+			}
+			if ethHdrBuf != nil {
+				v := &iovecs[iovecIdx]
+				v.Base = &ethHdrBuf[0]
+				v.Len = uint64(len(ethHdrBuf))
+				iovecIdx++
+			}
+			pktSize := uint64(0)
+			// Encode L3 Header
 			v := &iovecs[iovecIdx]
-			v.Base = &vnetHdrBuf[0]
-			v.Len = uint64(len(vnetHdrBuf))
+			hdr := &pkt.Header
+			hdrView := hdr.View()
+			v.Base = &hdrView[0]
+			v.Len = uint64(len(hdrView))
+			pktSize += v.Len
 			iovecIdx++
-		}
-		if ethHdrBuf != nil {
-			v := &iovecs[iovecIdx]
-			v.Base = &ethHdrBuf[0]
-			v.Len = uint64(len(ethHdrBuf))
-			iovecIdx++
-		}
-		pktSize := uint64(0)
-		// Encode L3 Header
-		v := &iovecs[iovecIdx]
-		hdr := &pkt.Header
-		hdrView := hdr.View()
-		v.Base = &hdrView[0]
-		v.Len = uint64(len(hdrView))
-		pktSize += v.Len
-		iovecIdx++
 
-		// Now encode the Transport Payload.
-		pktViews := pkt.Data.Views()
-		for i := range pktViews {
-			vec := &iovecs[iovecIdx]
-			iovecIdx++
-			vec.Base = &pktViews[i][0]
-			vec.Len = uint64(len(pktViews[i]))
-			pktSize += vec.Len
+			// Now encode the Transport Payload.
+			pktViews := pkt.Data.Views()
+			for i := range pktViews {
+				vec := &iovecs[iovecIdx]
+				iovecIdx++
+				vec.Base = &pktViews[i][0]
+				vec.Len = uint64(len(pktViews[i]))
+				pktSize += vec.Len
+			}
+			mmsgHdr.Msg.Iovlen = uint64(iovecIdx)
+			mmsgHdrIdx++
 		}
-		mmsgHdr.Msg.Iovlen = uint64(iovecIdx)
-		i++
-	}
 
-	packets := 0
-	for packets < n {
-		fd := e.fds[pkts.Front().Hash%uint32(len(e.fds))]
-		sent, err := rawfile.NonBlockingSendMMsg(fd, mmsgHdrs)
-		if err != nil {
-			return packets, err
+		packets := 0
+		for packets < n {
+			sent, err := rawfile.NonBlockingSendMMsg(batchFD, mmsgHdrs)
+			if err != nil {
+				return sentPackets, err
+			}
+			packets += sent
+			sentPackets += sent
+			mmsgHdrs = mmsgHdrs[sent:]
 		}
-		packets += sent
-		mmsgHdrs = mmsgHdrs[sent:]
 	}
-	return packets, nil
+	return sentPackets, nil
 }
 
 // viewsEqual tests whether v1 and v2 refer to the same backing bytes.

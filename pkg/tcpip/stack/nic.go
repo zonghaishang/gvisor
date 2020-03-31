@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
@@ -1221,8 +1222,9 @@ func (n *NIC) DeliverNetworkPacket(linkEP LinkEndpoint, remote, local tcpip.Link
 
 	// TODO(gvisor.dev/issue/170): Not supporting iptables for IPv6 yet.
 	if protocol == header.IPv4ProtocolNumber {
+		// iptables filtering.
 		ipt := n.stack.IPTables()
-		if ok := ipt.Check(Prerouting, pkt); !ok {
+		if ok := ipt.Check(Prerouting, pkt, nil, nil, nil); !ok {
 			// iptables is telling us to drop the packet.
 			return
 		}
@@ -1344,7 +1346,9 @@ func (n *NIC) DeliverTransportPacket(r *Route, protocol tcpip.TransportProtocolN
 	}
 
 	id := TransportEndpointID{dstPort, r.LocalAddress, srcPort, r.RemoteAddress}
+	log.Infof("Endpoint id: %v", id)
 	if n.stack.demux.deliverPacket(r, protocol, pkt, id) {
+		log.Infof("deliverPacket success")
 		return
 	}
 

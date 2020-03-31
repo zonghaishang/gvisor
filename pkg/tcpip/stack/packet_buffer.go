@@ -60,6 +60,10 @@ type PacketBuffer struct {
 	// Owner is implemented by task to get the uid and gid.
 	// Only set for locally generated packets.
 	Owner tcpip.PacketOwner
+
+	// NatDone indicates if the packet is manipulated as per NAT
+	// iptables rule.
+	NatDone bool
 }
 
 // Clone makes a copy of pk. It clones the Data field, which creates a new

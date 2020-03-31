@@ -23,6 +23,7 @@ package ipv4
 import (
 	"sync/atomic"
 
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -241,15 +242,29 @@ func (e *endpoint) addIPHeader(r *stack.Route, hdr *buffer.Prependable, payloadS
 
 // WritePacket writes a packet to the given destination address and protocol.
 func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, params stack.NetworkHeaderParams, pkt stack.PacketBuffer) *tcpip.Error {
-	ip := e.addIPHeader(r, &pkt.Header, pkt.Data.Size(), params)
-	pkt.NetworkHeader = buffer.View(ip)
-
 	// iptables filtering. All packets that reach here are locally
 	// generated.
 	ipt := e.stack.IPTables()
-	if ok := ipt.Check(stack.Output, pkt); !ok {
-		// iptables is telling us to drop the packet.
-		return nil
+	if !pkt.NatDone {
+		ip := e.addIPHeader(r, &pkt.Header, pkt.Data.Size(), params)
+		pkt.NetworkHeader = buffer.View(ip)
+
+		var natDone bool
+		if ok := ipt.Check(stack.Output, pkt, gso, r, &natDone); !ok {
+			// iptables is telling us to drop the packet.
+			return nil
+		}
+
+		if natDone {
+			pkt.NatDone = natDone
+			netHeader := header.IPv4(pkt.NetworkHeader)
+			log.Infof("Route: %v", r)
+			// Find network endpoint with new route and deliver packet.
+			if route, err := e.stack.FindRoute(0, netHeader.SourceAddress(), netHeader.DestinationAddress(), header.IPv4ProtocolNumber, false); err == nil {
+				log.Infof("New route: %v", route)
+				return route.WritePacket(gso, params, pkt)
+			}
+		}
 	}
 
 	if r.Loop&stack.PacketLoop != 0 {
@@ -272,6 +287,7 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, params stack.Netw
 	if pkt.Header.UsedLength()+pkt.Data.Size() > int(e.linkEP.MTU()) && (gso == nil || gso.Type == stack.GSONone) {
 		return e.writePacketFragments(r, gso, int(e.linkEP.MTU()), pkt)
 	}
+
 	if err := e.linkEP.WritePacket(r, gso, ProtocolNumber, pkt); err != nil {
 		return err
 	}
@@ -297,7 +313,7 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.Packe
 	// iptables filtering. All packets that reach here are locally
 	// generated.
 	ipt := e.stack.IPTables()
-	dropped := ipt.CheckPackets(stack.Output, pkts)
+	dropped := ipt.CheckPackets(stack.Output, pkts, gso, r)
 	if len(dropped) == 0 {
 		// Fast path: If no packets are to be dropped then we can just invoke the
 		// faster WritePackets API directly.
@@ -394,7 +410,7 @@ func (e *endpoint) HandlePacket(r *stack.Route, pkt stack.PacketBuffer) {
 	// iptables filtering. All packets that reach here are intended for
 	// this machine and will not be forwarded.
 	ipt := e.stack.IPTables()
-	if ok := ipt.Check(stack.Input, pkt); !ok {
+	if ok := ipt.Check(stack.Input, pkt, nil, nil, nil); !ok {
 		// iptables is telling us to drop the packet.
 		return
 	}

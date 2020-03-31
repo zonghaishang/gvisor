@@ -45,6 +45,10 @@ const HookUnset = -1
 func DefaultTables() IPTables {
 	// TODO(gvisor.dev/issue/170): We may be able to swap out some strings for
 	// iotas.
+	ct := ConnTrackTable{
+		CtMap: make(map[uint32]ConnTrackTupleHolder),
+		Seed:  generateRandUint32(),
+	}
 	return IPTables{
 		Tables: map[string]Table{
 			TablenameNat: Table{
@@ -110,6 +114,7 @@ func DefaultTables() IPTables {
 			Prerouting: []string{TablenameMangle, TablenameNat},
 			Output:     []string{TablenameMangle, TablenameNat, TablenameFilter},
 		},
+		Connections: &ct,
 	}
 }
 
@@ -173,12 +178,21 @@ const (
 // dropped.
 //
 // Precondition: pkt.NetworkHeader is set.
-func (it *IPTables) Check(hook Hook, pkt PacketBuffer) bool {
+func (it *IPTables) Check(hook Hook, pkt PacketBuffer, gso *GSO, r *Route, natDone *bool) bool {
+	// Set up connection for Prerouting and Output hook.
+	if ct := it.ConnTrackTable(); ct != nil {
+		// Packets are manipulated only if connection and matching
+		// NAT rule exists.
+		if ct.HandlePacket(pkt, hook, gso, r, natDone) {
+			return true
+		}
+	}
+
 	// Go through each table containing the hook.
 	for _, tablename := range it.Priorities[hook] {
 		table := it.Tables[tablename]
 		ruleIdx := table.BuiltinChains[hook]
-		switch verdict := it.checkChain(hook, pkt, table, ruleIdx); verdict {
+		switch verdict := it.checkChain(hook, pkt, table, ruleIdx, gso, r); verdict {
 		// If the table returns Accept, move on to the next table.
 		case chainAccept:
 			continue
@@ -189,7 +203,7 @@ func (it *IPTables) Check(hook Hook, pkt PacketBuffer) bool {
 			// Any Return from a built-in chain means we have to
 			// call the underflow.
 			underflow := table.Rules[table.Underflows[hook]]
-			switch v, _ := underflow.Target.Action(pkt); v {
+			switch v, _ := underflow.Target.Action(pkt, it.Connections, hook, gso, r); v {
 			case RuleAccept:
 				continue
 			case RuleDrop:
@@ -206,6 +220,11 @@ func (it *IPTables) Check(hook Hook, pkt PacketBuffer) bool {
 	}
 
 	// Every table returned Accept.
+	if ct := it.ConnTrackTable(); ct != nil {
+		// Packets are manipulated only if connection and matching
+		// NAT rule exists.
+		ct.HandlePacket(pkt, hook, gso, r, natDone)
+	}
 	return true
 }
 
@@ -214,24 +233,28 @@ func (it *IPTables) Check(hook Hook, pkt PacketBuffer) bool {
 //
 // NOTE: unlike the Check API the returned map contains packets that should be
 // dropped.
-func (it *IPTables) CheckPackets(hook Hook, pkts PacketBufferList) (drop map[*PacketBuffer]struct{}) {
+func (it *IPTables) CheckPackets(hook Hook, pkts PacketBufferList, gso *GSO, r *Route) (drop map[*PacketBuffer]struct{}) {
 	for pkt := pkts.Front(); pkt != nil; pkt = pkt.Next() {
-		if ok := it.Check(hook, *pkt); !ok {
-			if drop == nil {
-				drop = make(map[*PacketBuffer]struct{})
+		if !pkt.NatDone {
+			var natDone bool
+			if ok := it.Check(hook, *pkt, gso, r, &natDone); !ok {
+				if drop == nil {
+					drop = make(map[*PacketBuffer]struct{})
+				}
+				drop[pkt] = struct{}{}
 			}
-			drop[pkt] = struct{}{}
+			pkt.NatDone = natDone
 		}
 	}
 	return drop
 }
 
 // Precondition: pkt.NetworkHeader is set.
-func (it *IPTables) checkChain(hook Hook, pkt PacketBuffer, table Table, ruleIdx int) chainVerdict {
+func (it *IPTables) checkChain(hook Hook, pkt PacketBuffer, table Table, ruleIdx int, gso *GSO, r *Route) chainVerdict {
 	// Start from ruleIdx and walk the list of rules until a rule gives us
 	// a verdict.
 	for ruleIdx < len(table.Rules) {
-		switch verdict, jumpTo := it.checkRule(hook, pkt, table, ruleIdx); verdict {
+		switch verdict, jumpTo := it.checkRule(hook, pkt, table, ruleIdx, gso, r); verdict {
 		case RuleAccept:
 			return chainAccept
 
@@ -248,7 +271,7 @@ func (it *IPTables) checkChain(hook Hook, pkt PacketBuffer, table Table, ruleIdx
 				ruleIdx++
 				continue
 			}
-			switch verdict := it.checkChain(hook, pkt, table, jumpTo); verdict {
+			switch verdict := it.checkChain(hook, pkt, table, jumpTo, gso, r); verdict {
 			case chainAccept:
 				return chainAccept
 			case chainDrop:
@@ -272,7 +295,7 @@ func (it *IPTables) checkChain(hook Hook, pkt PacketBuffer, table Table, ruleIdx
 }
 
 // Precondition: pk.NetworkHeader is set.
-func (it *IPTables) checkRule(hook Hook, pkt PacketBuffer, table Table, ruleIdx int) (RuleVerdict, int) {
+func (it *IPTables) checkRule(hook Hook, pkt PacketBuffer, table Table, ruleIdx int, gso *GSO, r *Route) (RuleVerdict, int) {
 	rule := table.Rules[ruleIdx]
 
 	// If pkt.NetworkHeader hasn't been set yet, it will be contained in
@@ -301,7 +324,7 @@ func (it *IPTables) checkRule(hook Hook, pkt PacketBuffer, table Table, ruleIdx 
 	}
 
 	// All the matchers matched, so run the target.
-	return rule.Target.Action(pkt)
+	return rule.Target.Action(pkt, it.Connections, hook, gso, r)
 }
 
 func filterMatch(filter IPHeaderFilter, hdr header.IPv4) bool {
@@ -325,4 +348,8 @@ func filterMatch(filter IPHeaderFilter, hdr header.IPv4) bool {
 	}
 
 	return true
+}
+
+func (it *IPTables) ConnTrackTable() *ConnTrackTable {
+	return it.Connections
 }

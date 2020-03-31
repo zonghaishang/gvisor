@@ -126,7 +126,12 @@ func (tm *TCPMatcher) Match(hook stack.Hook, pkt stack.PacketBuffer, interfaceNa
 			// packet.
 			return false, true
 		}
-		tcpHeader = header.TCP(pkt.Data.First())
+		headerView := pkt.Data.First()
+		length := netHeader.HeaderLength()
+		if hook == stack.Prerouting {
+			headerView = headerView[length:]
+		}
+		tcpHeader = header.TCP(headerView)
 	}
 
 	// Check whether the source and destination ports are within the

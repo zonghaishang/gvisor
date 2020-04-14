@@ -46,9 +46,11 @@ import (
 	"gvisor.dev/gvisor/pkg/p9"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/pipe"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/unet"
@@ -585,6 +587,14 @@ type dentry struct {
 	// and target are protected by dataMu.
 	haveTarget bool
 	target     string
+
+	// If this dentry represents a synthetic socket file, endpoint is the
+	// transport endpoint bound to this file.
+	endpoint transport.BoundEndpoint
+
+	// If this dentry represents a synthetic named pipe, pipe is the pipe
+	// endpoint bound to this file.
+	pipe *pipe.VFSPipe
 }
 
 // dentryAttrMask returns a p9.AttrMask enabling all attributes used by the
@@ -1066,6 +1076,9 @@ func (d *dentry) destroyLocked() {
 			panic("gofer.dentry.DecRef() called without holding a reference")
 		}
 	}
+	if d.endpoint != nil {
+		d.endpoint.Release()
+	}
 }
 
 func (d *dentry) isDeleted() bool {
@@ -1134,7 +1147,7 @@ func (d *dentry) removexattr(ctx context.Context, creds *auth.Credentials, name 
 	return d.file.removeXattr(ctx, name)
 }
 
-// Preconditions: !d.file.isNil(). d.isRegularFile() || d.isDirectory().
+// Preconditions: !d.isSynthetic(). d.isRegularFile() || d.isDirectory().
 func (d *dentry) ensureSharedHandle(ctx context.Context, read, write, trunc bool) error {
 	// O_TRUNC unconditionally requires us to obtain a new handle (opened with
 	// O_TRUNC).

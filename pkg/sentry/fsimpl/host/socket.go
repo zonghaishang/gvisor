@@ -1,4 +1,4 @@
-// Copyright 2018 The gVisor Authors.
+// Copyright 2020 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,9 +24,7 @@ import (
 	"gvisor.dev/gvisor/pkg/fdnotifier"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/refs"
-	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/socket/control"
-	unixsocket "gvisor.dev/gvisor/pkg/sentry/socket/unix"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/sentry/uniqueid"
 	"gvisor.dev/gvisor/pkg/sync"
@@ -37,7 +35,27 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-// LINT.IfChange
+// Create a new host-backed endpoint from the given fd.
+func newEndpoint(ctx context.Context, hostFD int) (transport.Endpoint, error) {
+	// We need to dup the host fd, because the created endpoint independently
+	// manages the lifetime of its fd.
+	hfd, err := syscall.Dup(hostFD)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set up an external transport.Endpoint using the host fd.
+	f := fd.New(hfd)
+	var q waiter.Queue
+	e, err2 := NewConnectedEndpoint(ctx, f, &q, "" /* path */, true /* saveable */)
+	if err2 != nil {
+		f.Release()
+		return nil, err2.ToError()
+	}
+	e.Init()
+	ep := transport.NewExternal(ctx, e.stype, uniqueid.GlobalProviderFromContext(ctx), &q, e, e)
+	return ep, nil
+}
 
 // maxSendBufferSize is the maximum host send buffer size allowed for endpoint.
 //
@@ -114,13 +132,18 @@ func (c *ConnectedEndpoint) init() *syserr.Error {
 	return nil
 }
 
-// NewConnectedEndpoint creates a new ConnectedEndpoint backed by a host FD
+// NewConnectedEndpoint creates a new ConnectedEndpoint backed by a host fd
 // that will pretend to be bound at a given sentry path.
 //
 // The caller is responsible for calling Init(). Additionaly, Release needs to
 // be called twice because ConnectedEndpoint is both a transport.Receiver and
 // transport.ConnectedEndpoint.
-func NewConnectedEndpoint(ctx context.Context, file *fd.FD, queue *waiter.Queue, path string) (*ConnectedEndpoint, *syserr.Error) {
+//
+// If the host fd was imported at startup, saveable should be true, since we
+// expect that the host will provide the same fd upon restore. If the host
+// passed the fd through a Unix socket, however, saveable should be false
+// because the host cannot guarantee the same descriptor number across S/R.
+func NewConnectedEndpoint(ctx context.Context, file *fd.FD, queue *waiter.Queue, path string, saveable bool) (*ConnectedEndpoint, *syserr.Error) {
 	e := ConnectedEndpoint{
 		path:  path,
 		queue: queue,
@@ -134,9 +157,11 @@ func NewConnectedEndpoint(ctx context.Context, file *fd.FD, queue *waiter.Queue,
 
 	// AtomicRefCounters start off with a single reference. We need two.
 	e.ref.IncRef()
-
 	e.ref.EnableLeakCheck("host.ConnectedEndpoint")
-
+	if saveable {
+		// Unlike in VFS1, we do not dup imported fds in VFS2.
+		e.srfd = file.FD()
+	}
 	return &e, nil
 }
 
@@ -145,62 +170,6 @@ func (c *ConnectedEndpoint) Init() {
 	if err := fdnotifier.AddFD(int32(c.file.FD()), c.queue); err != nil {
 		panic(err)
 	}
-}
-
-// NewSocketWithDirent allocates a new unix socket with host endpoint.
-//
-// This is currently only used by unsaveable Gofer nodes.
-//
-// NewSocketWithDirent takes ownership of f on success.
-func NewSocketWithDirent(ctx context.Context, d *fs.Dirent, f *fd.FD, flags fs.FileFlags) (*fs.File, error) {
-	f2 := fd.New(f.FD())
-	var q waiter.Queue
-	e, err := NewConnectedEndpoint(ctx, f2, &q, "" /* path */)
-	if err != nil {
-		f2.Release()
-		return nil, err.ToError()
-	}
-
-	// Take ownship of the FD.
-	f.Release()
-
-	e.Init()
-
-	ep := transport.NewExternal(ctx, e.stype, uniqueid.GlobalProviderFromContext(ctx), &q, e, e)
-
-	return unixsocket.NewWithDirent(ctx, d, ep, e.stype, flags), nil
-}
-
-// newSocket allocates a new unix socket with host endpoint.
-func newSocket(ctx context.Context, orgfd int, saveable bool) (*fs.File, error) {
-	ownedfd := orgfd
-	srfd := -1
-	if saveable {
-		var err error
-		ownedfd, err = syscall.Dup(orgfd)
-		if err != nil {
-			return nil, err
-		}
-		srfd = orgfd
-	}
-	f := fd.New(ownedfd)
-	var q waiter.Queue
-	e, err := NewConnectedEndpoint(ctx, f, &q, "" /* path */)
-	if err != nil {
-		if saveable {
-			f.Close()
-		} else {
-			f.Release()
-		}
-		return nil, err.ToError()
-	}
-
-	e.srfd = srfd
-	e.Init()
-
-	ep := transport.NewExternal(ctx, e.stype, uniqueid.GlobalProviderFromContext(ctx), &q, e, e)
-
-	return unixsocket.New(ctx, ep, e.stype), nil
 }
 
 // Send implements transport.ConnectedEndpoint.Send.
@@ -324,7 +293,7 @@ func (c *ConnectedEndpoint) Recv(data [][]byte, creds bool, numRights int, peek 
 	if len(fds) == 0 {
 		return rl, ml, transport.ControlMessages{}, cTrunc, tcpip.FullAddress{Addr: tcpip.Address(c.path)}, false, nil
 	}
-	return rl, ml, control.New(nil, nil, newSCMRights(fds)), cTrunc, tcpip.FullAddress{Addr: tcpip.Address(c.path)}, false, nil
+	return rl, ml, control.NewVFS2(nil, nil, newSCMRights(fds)), cTrunc, tcpip.FullAddress{Addr: tcpip.Address(c.path)}, false, nil
 }
 
 // close releases all resources related to the endpoint.
@@ -390,5 +359,3 @@ func (c *ConnectedEndpoint) Release() {
 
 // CloseUnread implements transport.ConnectedEndpoint.CloseUnread.
 func (c *ConnectedEndpoint) CloseUnread() {}
-
-// LINT.ThenChange(../../fsimpl/host/socket.go)

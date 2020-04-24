@@ -255,7 +255,7 @@ func (w *Watchdog) runTurn() {
 	case <-done:
 	case <-time.After(w.TaskTimeout):
 		// Report if the watchdog is not making progress.
-		// No one is wathching the watchdog watcher though.
+		// No one is watching the watchdog watcher though.
 		w.reportStuckWatchdog()
 		<-done
 	}
@@ -317,10 +317,8 @@ func (w *Watchdog) report(offenders map[*kernel.Task]*offender, newTaskFound boo
 
 	buf.WriteString("Search for '(*Task).run(0x..., 0x<tid>)' in the stack dump to find the offending goroutine")
 
-	// Dump stack only if a new task is detected or if it sometime has
-	// passed since the last time a stack dump was generated.
-	showStack := newTaskFound || time.Since(w.lastStackDump) >= stackDumpSameTaskPeriod
-	w.doAction(w.TaskTimeoutAction, showStack, &buf)
+	// Force stack dump only if a new task is detected.
+	w.doAction(w.TaskTimeoutAction, newTaskFound, &buf)
 }
 
 func (w *Watchdog) reportStuckWatchdog() {
@@ -331,10 +329,12 @@ func (w *Watchdog) reportStuckWatchdog() {
 
 // doAction will take the given action. If the action is LogWarning and
 // showStack is false, then the stack printing will be skipped.
-func (w *Watchdog) doAction(action Action, showStack bool, msg *bytes.Buffer) {
+func (w *Watchdog) doAction(action Action, forceStack bool, msg *bytes.Buffer) {
 	switch action {
 	case LogWarning:
-		if !showStack {
+		// Dump stack only if forced or sometime has passed since the last time a
+		// stack dump was generated.
+		if !forceStack && time.Since(w.lastStackDump) < stackDumpSameTaskPeriod {
 			msg.WriteString("\n...[stack dump skipped]...")
 			log.Warningf(msg.String())
 			return
@@ -359,6 +359,7 @@ func (w *Watchdog) doAction(action Action, showStack bool, msg *bytes.Buffer) {
 		case <-time.After(1 * time.Second):
 		}
 		panic(fmt.Sprintf("%s\nStack for running G's are skipped while panicking.", msg.String()))
+
 	default:
 		panic(fmt.Sprintf("Unknown watchdog action %v", action))
 

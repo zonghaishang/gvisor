@@ -502,7 +502,7 @@ func TestRestoreEnvironment(t *testing.T) {
 						{
 							Dev:        "9pfs-/",
 							Flags:      fs.MountSourceFlags{ReadOnly: true},
-							DataString: "trans=fd,rfdno=0,wfdno=0,privateunixsocket=true,cache=remote_revalidating",
+							DataString: "trans=fd,rfdno=0,wfdno=0,cache=remote_revalidating",
 						},
 					},
 					"tmpfs": {
@@ -556,11 +556,11 @@ func TestRestoreEnvironment(t *testing.T) {
 						{
 							Dev:        "9pfs-/",
 							Flags:      fs.MountSourceFlags{ReadOnly: true},
-							DataString: "trans=fd,rfdno=0,wfdno=0,privateunixsocket=true,cache=remote_revalidating",
+							DataString: "trans=fd,rfdno=0,wfdno=0,cache=remote_revalidating",
 						},
 						{
 							Dev:        "9pfs-/dev/fd-foo",
-							DataString: "trans=fd,rfdno=1,wfdno=1,privateunixsocket=true,cache=remote_revalidating",
+							DataString: "trans=fd,rfdno=1,wfdno=1,cache=remote_revalidating",
 						},
 					},
 					"tmpfs": {
@@ -614,7 +614,7 @@ func TestRestoreEnvironment(t *testing.T) {
 						{
 							Dev:        "9pfs-/",
 							Flags:      fs.MountSourceFlags{ReadOnly: true},
-							DataString: "trans=fd,rfdno=0,wfdno=0,privateunixsocket=true,cache=remote_revalidating",
+							DataString: "trans=fd,rfdno=0,wfdno=0,cache=remote_revalidating",
 						},
 					},
 					"tmpfs": {

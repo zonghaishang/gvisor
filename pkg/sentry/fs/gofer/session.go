@@ -313,9 +313,7 @@ func Root(ctx context.Context, dev string, filesystem fs.Filesystem, superBlockF
 	}
 	s.EnableLeakCheck("gofer.session")
 
-	if o.privateunixsocket {
-		s.overrides = newOverrideMaps()
-	}
+	s.overrides = newOverrideMaps()
 
 	// Construct the MountSource with the session and superBlockFlags.
 	m := fs.NewMountSource(ctx, &s, filesystem, superBlockFlags)
